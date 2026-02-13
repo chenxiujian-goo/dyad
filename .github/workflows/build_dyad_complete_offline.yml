@@ -17,7 +17,7 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
-      # 阶段1：构建基础镜像
+      # 阶段1：构建基础镜像（使用 Node.js 24.x）
       - name: Create Base Dockerfile
         run: |
           cat > Dockerfile.base << 'DOCKERFILE'
@@ -42,10 +42,13 @@ jobs:
             libxcb-dri3-0 libgl1-mesa-glx libgl1-mesa-dri xvfb \
             && rm -rf /var/lib/apt/lists/*
 
-          # 安装 Node.js 22.x
-          RUN curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \
+          # 安装 Node.js 24.x（Dyad 要求 >= 24）
+          RUN curl -fsSL https://deb.nodesource.com/setup_24.x | bash - \
             && apt-get install -y nodejs \
             && rm -rf /var/lib/apt/lists/*
+
+          # 验证 Node 版本
+          RUN node --version && npm --version
 
           # 配置 npm 镜像
           ENV npm_config_registry=https://registry.npmmirror.com  
@@ -57,6 +60,8 @@ jobs:
           COPY --chown=dyad:dyad . .
 
           USER dyad
+          
+          # 使用 --force 忽略引擎检查（如果需要）
           RUN npm cache clean --force && \
               npm install --no-audit --no-fund
 
@@ -151,6 +156,10 @@ jobs:
           cat > ./prebuilt-deps/README.md << 'EOF'
           # 预构建依赖使用说明
           
+          ## 环境要求
+          - Ubuntu 20.04
+          - Node.js >= 24.x（与你构建时的版本一致）
+          
           ## 文件说明
           - `node_modules/`: 包含所有 npm 依赖和预编译的原生模块
           - `cache/`: Electron 缓存（包含下载的 Electron 二进制文件）
@@ -161,6 +170,7 @@ jobs:
           1. 将本目录内容复制到你的项目根目录：
              ```bash
              # 在项目根目录执行
+             tar -xzf prebuilt-dependencies.tar.gz
              cp -r node_modules /path/to/your/dyad-project/
              cp -r cache ~/.cache/
              cp -r config ~/.config/
@@ -180,10 +190,16 @@ jobs:
              npm start  # 应该不会再出现 Preparing native dependencies
              ```
           
-          ## 注意事项
-          - 这些依赖是针对 Ubuntu 20.04 + Node.js 22.x 构建的
-          - 如果本地 Node 版本不同，可能需要重新编译部分模块
-          - 确保本地 Electron 版本与容器内一致（检查 package.json）
+          ## 如果仍然卡住
+          如果还是出现 "Preparing native dependencies"，尝试：
+          ```bash
+          # 强制重建原生模块
+          npx electron-rebuild
+          
+          # 或清除缓存后重启
+          rm -rf ~/.config/Dyad
+          rm -rf ~/.cache/electron
+          ```
           EOF
           
           # 清理临时容器
@@ -226,3 +242,6 @@ jobs:
           echo "- ✅ 完整的 node_modules（含预编译原生模块）" >> $GITHUB_STEP_SUMMARY
           echo "- ✅ Electron 缓存" >> $GITHUB_STEP_SUMMARY
           echo "- ✅ Electron 配置" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### 注意：Node.js 版本要求" >> $GITHUB_STEP_SUMMARY
+          echo "Dyad 要求 Node.js >= 24.x，已使用 Node.js 24.x 构建" >> $GITHUB_STEP_SUMMARY
