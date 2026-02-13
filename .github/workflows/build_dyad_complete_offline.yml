@@ -32,7 +32,7 @@ jobs:
 
           WORKDIR /app
 
-          # 安装所有依赖（包含 Python 和编译工具）
+          # 安装所有依赖
           RUN apt-get update && apt-get install -y \
             curl wget git python3 python3-distutils python3-dev \
             make g++ gcc build-essential \
@@ -68,18 +68,16 @@ jobs:
           # 创建必要目录
           RUN mkdir -p userData .vite/build
 
-          # 关键：使用 electron-rebuild 针对 Electron 40.0.0 重建所有 native 模块
-          # 这会正确处理 better-sqlite3 和其他原生依赖
+          # 使用 electron-rebuild 重建所有 native 模块
           RUN npx electron-rebuild \
               --arch=x64 \
               --version=40.0.0 \
               --dist-url=https://npmmirror.com/mirrors/electron/ \
               --verbose
 
-          # 验证 better-sqlite3 是否正确构建
+          # 验证 better-sqlite3
           RUN ls -la node_modules/better-sqlite3/build/Release/better_sqlite3.node && \
-              file node_modules/better-sqlite3/build/Release/better_sqlite3.node && \
-              ldd node_modules/better-sqlite3/build/Release/better_sqlite3.node | head -10
+              file node_modules/better-sqlite3/build/Release/better_sqlite3.node
 
           # 构建项目
           RUN npm run build 2>/dev/null || npm run vite:build 2>/dev/null || echo "Build step completed"
@@ -119,7 +117,6 @@ jobs:
               
               echo '=== 验证 better-sqlite3 构建 ==='
               ls -la node_modules/better-sqlite3/build/Release/
-              file node_modules/better-sqlite3/build/Release/better_sqlite3.node
               
               echo '=== 启动应用 ==='
               timeout 30s npx electron . --no-sandbox --disable-gpu 2>&1 || echo 'Runtime initialization completed'
@@ -176,10 +173,10 @@ jobs:
           fetch-retry-maxtimeout=1
           EOF
           
-          # 创建启动脚本
+          # 创建启动脚本（关键修改：跳过 electron-rebuild）
           cat > ./offline-deps/start-offline.sh << 'EOF'
           #!/bin/bash
-          # Dyad 离线启动脚本
+          # Dyad 离线启动脚本 - 完全跳过 rebuild
           
           echo "Setting up offline environment..."
           
@@ -191,39 +188,97 @@ jobs:
           export npm_config_fetch_retry_maxtimeout=1
           export ELECTRON_OFFLINE=1
           
+          # 关键：跳过 electron-rebuild
+          export ELECTRON_SKIP_BINARY_DOWNLOAD=1
+          export ELECTRON_OVERRIDE_DIST_PATH=""
+          export npm_config_build_from_source=true
+          
+          # 禁用所有 postinstall 脚本（防止触发 rebuild）
+          export npm_config_ignore_scripts=true
+          
           echo "Starting Dyad in offline mode..."
-          npm start
+          
+          # 直接启动，不运行任何 rebuild
+          npx electron . --no-sandbox
           EOF
           chmod +x ./offline-deps/start-offline.sh
+          
+          # 创建修改后的 package.json 脚本
+          cat > ./offline-deps/package-scripts.json << 'EOF'
+          {
+            "scripts": {
+              "start": "electron .",
+              "postinstall": "echo 'Skipping rebuild in offline mode'",
+              "rebuild": "echo 'Skipping rebuild in offline mode'",
+              "electron-rebuild": "echo 'Skipping electron-rebuild in offline mode'"
+            }
+          }
+          EOF
           
           # 创建使用说明
           cat > ./offline-deps/README.md << 'EOF'
           # Dyad 完全离线依赖包
           
-          ## 快速开始
+          ## 重要：本地必须修改 package.json
           
-          1. 解压到项目根目录：
-             ```bash
-             cd /path/to/your/dyad-project
-             tar -xzf offline-dependencies.tar.gz
-             ```
+          由于 `electron-rebuild` 会在每次启动时尝试下载 prebuild，你必须修改本地的 package.json：
           
-          2. 使用离线启动脚本：
-             ```bash
-             ./start-offline.sh
-             ```
+          ### 步骤1：修改 package.json
+          
+          找到你的 Dyad 项目的 `package.json`，修改 scripts 部分：
+          
+          ```json
+          {
+            "scripts": {
+              "start": "electron .",
+              "postinstall": "echo 'Skipping rebuild'",
+              "rebuild": "echo 'Skipping rebuild'"
+            }
+          }
+          ```
+          
+          ### 步骤2：解压并启动
+          
+          ```bash
+          cd /path/to/your/dyad-project
+          tar -xzf offline-dependencies.tar.gz
+          
+          # 使用离线脚本启动
+          ./start-offline.sh
+          ```
+          
+          ### 替代方案：直接启动（不修改 package.json）
+          
+          如果你不想修改 package.json，使用以下命令：
+          
+          ```bash
+          # 设置环境变量后直接用 node 启动 electron
+          export ELECTRON_SKIP_BINARY_DOWNLOAD=1
+          export npm_config_ignore_scripts=true
+          export ELECTRON_OFFLINE=1
+          
+          # 直接调用 electron，不通过 npm scripts
+          ./node_modules/.bin/electron . --no-sandbox
+          ```
           
           ## 故障排除
           
           ### 如果仍然尝试下载 prebuild
-          1. 检查 better-sqlite3 构建文件是否存在：
+          
+          1. 确保删除所有 prebuilds 目录：
+             ```bash
+             find node_modules -name "prebuilds" -type d -exec rm -rf {} + 2>/dev/null || true
+             ```
+          
+          2. 验证 better-sqlite3 构建文件：
              ```bash
              ls -la node_modules/better-sqlite3/build/Release/better_sqlite3.node
              ```
-          2. 如果存在但还是下载，删除 prebuilds 目录：
+          
+          3. 如果文件存在但还下载，可能是架构不匹配。检查：
              ```bash
-             rm -rf node_modules/better-sqlite3/prebuilds
-             rm -rf node_modules/**/prebuilds
+             file node_modules/better-sqlite3/build/Release/better_sqlite3.node
+             # 应该显示 x86-64 架构
              ```
           EOF
           
@@ -245,8 +300,9 @@ jobs:
         run: |
           echo "## ✅ 完全离线依赖包构建完成" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
-          echo "使用方式：" >> $GITHUB_STEP_SUMMARY
-          echo '```bash' >> $GITHUB_STEP_SUMMARY
-          echo 'tar -xzf offline-dependencies.tar.gz' >> $GITHUB_STEP_SUMMARY
-          echo './start-offline.sh' >> $GITHUB_STEP_SUMMARY
-          echo '```' >> $GITHUB_STEP_SUMMARY
+          echo "⚠️  重要：本地必须修改 package.json 跳过 rebuild！" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "使用步骤：" >> $GITHUB_STEP_SUMMARY
+          echo '1. 修改 package.json 的 scripts 部分' >> $GITHUB_STEP_SUMMARY
+          echo '2. tar -xzf offline-dependencies.tar.gz' >> $GITHUB_STEP_SUMMARY
+          echo '3. ./start-offline.sh' >> $GITHUB_STEP_SUMMARY
