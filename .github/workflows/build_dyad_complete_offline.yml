@@ -1,0 +1,346 @@
+name: Build Complete Offline Package for Ubuntu 20.04
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build-offline-package:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Create Dockerfile
+        run: |
+          cat > Dockerfile << 'DOCKERFILE'
+          FROM ubuntu:20.04
+
+          ENV DEBIAN_FRONTEND=noninteractive
+          ENV TZ=Asia/Shanghai
+
+          WORKDIR /app
+
+          # ============================================
+          # 第一阶段：安装系统依赖
+          # ============================================
+          RUN apt-get update && apt-get install -y \
+            curl \
+            wget \
+            git \
+            python3 \
+            python3-pip \
+            make \
+            g++ \
+            gcc \
+            build-essential \
+            libnss3 \
+            libnss3-dev \
+            libatk-bridge2.0-0 \
+            libatk-bridge2.0-dev \
+            libdrm2 \
+            libxkbcommon0 \
+            libxkbcommon-dev \
+            libxcomposite1 \
+            libxcomposite-dev \
+            libxdamage1 \
+            libxdamage-dev \
+            libxrandr2 \
+            libxrandr-dev \
+            libgbm1 \
+            libgbm-dev \
+            libxss1 \
+            libxss-dev \
+            libasound2 \
+            libasound2-dev \
+            libgtk-3-0 \
+            libgtk-3-dev \
+            libxtst6 \
+            libatspi2.0-0 \
+            libuuid1 \
+            ca-certificates \
+            xvfb \
+            x11-utils \
+            && rm -rf /var/lib/apt/lists/*
+
+          # ============================================
+          # 第二阶段：安装 Node.js 22
+          # ============================================
+          RUN curl -fsSL https://deb.nodesource.com/setup_22.x | bash - && \
+              apt-get install -y nodejs && \
+              rm -rf /var/lib/apt/lists/*
+
+          # 验证安装
+          RUN node --version && npm --version && echo "Node.js installed successfully"
+
+          # ============================================
+          # 第三阶段：配置 npm 镜像源
+          # ============================================
+          ENV npm_config_registry=https://registry.npmmirror.com
+          ENV ELECTRON_MIRROR=https://npmmirror.com/mirrors/electron/
+          ENV ELECTRON_SKIP_BINARY_DOWNLOAD=0
+          ENV ELECTRON_DISABLE_SANDBOX=1
+
+          # ============================================
+          # 第四阶段：安装项目依赖
+          # ============================================
+          COPY package*.json ./
+          
+          RUN echo "Installing npm dependencies..." && \
+              npm cache clean --force && \
+              npm install --no-audit --no-fund --verbose
+
+          # ============================================
+          # 第五阶段：复制项目代码
+          # ============================================
+          COPY . .
+          
+          RUN mkdir -p userData && \
+              echo "Project files copied successfully"
+
+          # ============================================
+          # 第六阶段：编译 TypeScript
+          # ============================================
+          RUN echo "Compiling TypeScript..." && \
+              npm run ts || true
+
+          # ============================================
+          # 第七阶段：预热 Electron（关键步骤）
+          # ============================================
+          ENV DISPLAY=:99
+          
+          # 启动 Xvfb，运行 Electron 确保所有二进制文件就绪
+          RUN echo "Warming up Electron - downloading all binaries..." && \
+              Xvfb :99 -screen 0 1024x768x24 -ac +extension GLX +render -noreset > /dev/null 2>&1 & \
+              XVFB_PID=$! && \
+              sleep 3 && \
+              echo "Xvfb started with PID $XVFB_PID" && \
+              echo "Running npm start to initialize Electron..." && \
+              timeout 20s npm start 2>&1 | tee /tmp/electron-warmup.log || true && \
+              sleep 2 && \
+              kill $XVFB_PID || true && \
+              echo "Electron warmup completed"
+
+          # ============================================
+          # 第八阶段：验证关键文件
+          # ============================================
+          RUN echo "Verifying Electron installation..." && \
+              ls -lah node_modules/electron/dist/electron && \
+              file node_modules/electron/dist/electron && \
+              du -sh node_modules/electron && \
+              echo "Electron binary verified"
+
+          # 验证原生模块
+          RUN echo "Verifying native modules..." && \
+              test -f node_modules/better-sqlite3/build/Release/better_sqlite3.node && \
+              echo "better-sqlite3: OK" || echo "better-sqlite3: NOT FOUND" && \
+              ls -la node_modules/better-sqlite3/build/Release/ || true
+
+          # ============================================
+          # 第九阶段：创建离线启动脚本
+          # ============================================
+          RUN cat > /app/start-offline.sh << 'STARTSCRIPT'
+#!/bin/bash
+set -e
+
+echo "===================================="
+echo "  Dyad 离线启动脚本"
+echo "===================================="
+
+cd "$(dirname "$0")"
+
+# 环境变量配置
+export ELECTRON_SKIP_BINARY_DOWNLOAD=1
+export ELECTRON_NO_ATTACH_CONSOLE=1
+export ELECTRON_DISABLE_SANDBOX=1
+export npm_config_update_notifier=false
+export DISPLAY=${DISPLAY:-:99}
+
+echo "检查 Electron 二进制..."
+if [ ! -f "node_modules/electron/dist/electron" ]; then
+    echo "错误: Electron 二进制文件不存在!"
+    exit 1
+fi
+
+echo "检查 Electron 可执行权限..."
+chmod +x node_modules/electron/dist/electron
+
+echo "检查共享库依赖..."
+if command -v ldd >/dev/null 2>&1; then
+    MISSING=$(ldd node_modules/electron/dist/electron | grep "not found" || true)
+    if [ -n "$MISSING" ]; then
+        echo "警告: 缺少以下共享库:"
+        echo "$MISSING"
+        echo "请安装系统依赖（参见 SYSTEM-DEPENDENCIES.txt）"
+        exit 1
+    fi
+    echo "共享库检查通过"
+fi
+
+# 检查或启动 Xvfb
+if ! xdpyinfo -display $DISPLAY >/dev/null 2>&1; then
+    echo "启动虚拟显示服务器 (Xvfb) on $DISPLAY..."
+    Xvfb $DISPLAY -screen 0 1024x768x24 -ac +extension GLX +render -noreset > /dev/null 2>&1 &
+    XVFB_PID=$!
+    echo "Xvfb PID: $XVFB_PID"
+    sleep 2
+    
+    # 验证 Xvfb 启动
+    if ! xdpyinfo -display $DISPLAY >/dev/null 2>&1; then
+        echo "错误: Xvfb 启动失败"
+        exit 1
+    fi
+    echo "Xvfb 启动成功"
+fi
+
+echo ""
+echo "启动 Dyad 应用..."
+echo "===================================="
+npm start
+
+STARTSCRIPT
+
+          RUN chmod +x /app/start-offline.sh
+
+          # ============================================
+          # 第十阶段：创建系统依赖说明
+          # ============================================
+          RUN cat > /app/SYSTEM-DEPENDENCIES.txt << 'SYSDEPS'
+# Ubuntu 20.04 系统依赖列表
+
+在目标机器上运行以下命令（需要联网一次）:
+
+sudo apt-get update
+sudo apt-get install -y \
+  libgtk-3-0 \
+  libnss3 \
+  libatk-bridge2.0-0 \
+  libdrm2 \
+  libxkbcommon0 \
+  libxcomposite1 \
+  libxdamage1 \
+  libxrandr2 \
+  libgbm1 \
+  libxss1 \
+  libasound2 \
+  libxtst6 \
+  libatspi2.0-0 \
+  xvfb \
+  x11-utils
+
+可选（如果需要在目标机器运行 npm 命令）:
+- Node.js 22.x （但离线运行 Dyad 不需要）
+
+验证系统依赖:
+ldd /path/to/dyad/node_modules/electron/dist/electron | grep "not found"
+（不应有任何输出）
+SYSDEPS
+
+          # ============================================
+          # 第十一阶段：创建部署信息文件
+          # ============================================
+          RUN cat > /app/DEPLOYMENT-INFO.txt << EOF
+Dyad 离线部署包信息
+==========================================
+构建时间: $(date)
+操作系统: Ubuntu 20.04
+Node.js: $(node --version)
+NPM: $(npm --version)
+Electron: $(cat node_modules/electron/package.json | grep '"version"' | head -1 | awk -F'"' '{print $4}')
+==========================================
+
+目录大小:
+$(du -sh /app)
+$(du -sh /app/node_modules)
+
+Electron 二进制:
+$(ls -lh /app/node_modules/electron/dist/electron)
+
+关键原生模块:
+$(ls -lh /app/node_modules/better-sqlite3/build/Release/*.node 2>/dev/null || echo "未找到")
+EOF
+
+          # ============================================
+          # 第十二阶段：清理不必要的文件
+          # ============================================
+          RUN echo "清理临时文件..." && \
+              rm -rf /tmp/* /var/tmp/* && \
+              rm -rf node_modules/.cache && \
+              find . -name "*.map" -delete || true && \
+              echo "清理完成"
+
+          # ============================================
+          # 容器默认命令
+          # ============================================
+          CMD ["/bin/bash", "/app/start-offline.sh"]
+          DOCKERFILE
+
+      - name: Build Docker image
+        run: |
+          echo "开始构建 Docker 镜像..."
+          docker build -t dyad-offline-ubuntu20:latest . --progress=plain
+          echo "Docker 镜像构建完成"
+
+      - name: Test container startup
+        run: |
+          echo "测试容器启动..."
+          timeout 25s docker run --rm dyad-offline-ubuntu20:latest || true
+          echo "容器测试完成"
+
+      - name: Extract complete app from container
+        run: |
+          echo "从容器提取应用目录..."
+          
+          # 创建容器（不启动）
+          CONTAINER_ID=$(docker create dyad-offline-ubuntu20:latest)
+          echo "容器 ID: $CONTAINER_ID"
+          
+          # 提取完整的 /app 目录
+          mkdir -p ./dyad-offline-extract
+          docker cp $CONTAINER_ID:/app/. ./dyad-offline-extract/
+          
+          # 清理容器
+          docker rm $CONTAINER_ID
+          
+          # 验证提取的文件
+          echo "验证提取的文件..."
+          ls -lah ./dyad-offline-extract/
+          test -f ./dyad-offline-extract/start-offline.sh || (echo "启动脚本缺失" && exit 1)
+          test -d ./dyad-offline-extract/node_modules || (echo "node_modules 缺失" && exit 1)
+          test -f ./dyad-offline-extract/node_modules/electron/dist/electron || (echo "Electron 二进制缺失" && exit 1)
+          
+          echo "文件提取并验证成功"
+
+      - name: Create deployment README
+        run: |
+          cat > ./dyad-offline-extract/README-DEPLOYMENT.md << 'EOF'
+# Dyad 离线部署指南
+
+## 📦 包内容
+
+这是一个完整的离线部署包，包含:
+- ✅ 所有 Node.js 依赖 (node_modules)
+- ✅ Electron 运行时和二进制文件
+- ✅ 已编译的原生模块 (better-sqlite3 等)
+- ✅ 应用源代码
+- ✅ 启动脚本
+
+## 🖥️ 系统要求
+
+- **操作系统**: Ubuntu 20.04 LTS
+- **架构**: x86_64 (amd64)
+- **必需的系统包**: 见 `SYSTEM-DEPENDENCIES.txt`
+
+## 📋 部署步骤
+
+### 步骤 1: 在目标机器上安装系统依赖（需要联网一次）
+
+```bash
+sudo apt-get update
+sudo apt-get install -y \
+  libgtk-3-0 libnss3 libatk-bridge2.0-0 libdrm2 libxkbcommon0 \
+  libxcomposite1 libxdamage1 libxrandr2 libgbm1 libxss1 \
+  libasound2 libxtst6 libatspi2.0-0 xvfb x11-utils
