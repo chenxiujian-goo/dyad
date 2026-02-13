@@ -147,11 +147,12 @@ jobs:
           docker commit dyad-runtime dyad-final:latest
           docker rm dyad-runtime
 
-      # 阶段4：提取所有必要文件
+      # 阶段4：从镜像中提取所有必要文件（修复版）
       - name: Extract All Dependencies
         run: |
           echo "Extracting all dependencies for offline use..."
           
+          # 创建临时容器（不启动）
           docker create --name dyad-extract dyad-final:latest
           
           mkdir -p ./offline-deps
@@ -169,14 +170,24 @@ jobs:
           mkdir -p ./offline-deps/electron-prebuilt
           docker cp dyad-extract:/app/node_modules/electron ./offline-deps/electron-prebuilt/ 2>/dev/null || true
           
-          # 检查 better-sqlite3 的具体构建产物
-          echo "=== better-sqlite3 构建产物 ==="
-          docker exec dyad-extract find /app/node_modules/better-sqlite3 -name "*.node" -type f
-          docker exec dyad-extract ls -la /app/node_modules/better-sqlite3/build/Release/ 2>/dev/null || true
+          # 检查 better-sqlite3 的具体构建产物（使用 docker cp 而不是 exec）
+          echo "=== 检查 better-sqlite3 构建产物 ==="
+          mkdir -p ./offline-deps/check
+          docker cp dyad-extract:/app/node_modules/better-sqlite3 ./offline-deps/check/ 2>/dev/null || true
+          
+          if [ -f "./offline-deps/check/better-sqlite3/build/Release/better_sqlite3.node" ]; then
+            echo "✅ better-sqlite3 构建成功"
+            ls -la ./offline-deps/check/better-sqlite3/build/Release/
+          else
+            echo "⚠️  查找所有 .node 文件："
+            find ./offline-deps/check/better-sqlite3 -name "*.node" -type f 2>/dev/null || echo "未找到 .node 文件"
+          fi
           
           # 创建 Electron 版本信息文件
-          docker exec dyad-extract cat /app/node_modules/electron/package.json | grep version > ./offline-deps/electron-version.txt
+          docker cp dyad-extract:/app/node_modules/electron/package.json ./offline-deps/electron-package.json
+          cat ./offline-deps/electron-package.json | grep version > ./offline-deps/electron-version.txt
           
+          # 清理临时容器
           docker rm dyad-extract
           
           # 创建详细使用说明
