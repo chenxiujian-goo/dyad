@@ -50,7 +50,7 @@ jobs:
 
           RUN node --version && npm --version
 
-          # 配置 npm 镜像（仅镜像，不设置离线）
+          # 配置 npm 镜像
           ENV npm_config_registry=https://registry.npmmirror.com  
           ENV ELECTRON_MIRROR=https://npmmirror.com/mirrors/electron/  
           ENV ELECTRON_BUILDER_BINARIES_MIRROR=https://npmmirror.com/mirrors/electron-builder-binaries/
@@ -61,29 +61,25 @@ jobs:
 
           USER dyad
 
-          # 安装依赖（正常联网安装）
+          # 安装依赖
           RUN npm cache clean --force && \
               npm install --include=dev --no-audit --no-fund
 
           # 创建必要目录
           RUN mkdir -p userData .vite/build
 
-          # 关键：构建 better-sqlite3 时强制从源码构建，禁用 prebuild 下载
-          RUN cd node_modules/better-sqlite3 && \
-              rm -rf prebuilds && \
-              npm_config_build_from_source=true \
-              npm_config_dist_url=https://npmmirror.com/mirrors/electron/ \
-              npm run build-release --verbose
+          # 关键：使用 electron-rebuild 针对 Electron 40.0.0 重建所有 native 模块
+          # 这会正确处理 better-sqlite3 和其他原生依赖
+          RUN npx electron-rebuild \
+              --arch=x64 \
+              --version=40.0.0 \
+              --dist-url=https://npmmirror.com/mirrors/electron/ \
+              --verbose
 
-          # 验证构建产物
+          # 验证 better-sqlite3 是否正确构建
           RUN ls -la node_modules/better-sqlite3/build/Release/better_sqlite3.node && \
-              file node_modules/better-sqlite3/build/Release/better_sqlite3.node
-
-          # 运行 electron-rebuild 确保所有 native 模块一致（强制从源码构建）
-          RUN npm_config_build_from_source=true \
-              npm_config_dist_url=https://npmmirror.com/mirrors/electron/ \
-              npx electron-rebuild --arch=x64 --version=40.0.0 --verbose || \
-              echo "electron-rebuild completed"
+              file node_modules/better-sqlite3/build/Release/better_sqlite3.node && \
+              ldd node_modules/better-sqlite3/build/Release/better_sqlite3.node | head -10
 
           # 构建项目
           RUN npm run build 2>/dev/null || npm run vite:build 2>/dev/null || echo "Build step completed"
@@ -171,7 +167,7 @@ jobs:
           
           docker rm dyad-extract
           
-          # 创建 .npmrc 配置文件（关键！强制离线）
+          # 创建 .npmrc 配置文件
           cat > ./offline-deps/.npmrc << 'EOF'
           offline=true
           prefer-offline=true
@@ -204,9 +200,6 @@ jobs:
           cat > ./offline-deps/README.md << 'EOF'
           # Dyad 完全离线依赖包
           
-          ## 重要提示
-          此包包含从源码编译的 better-sqlite3，已完全禁用 prebuild 下载。
-          
           ## 快速开始
           
           1. 解压到项目根目录：
@@ -215,21 +208,10 @@ jobs:
              tar -xzf offline-dependencies.tar.gz
              ```
           
-          2. 使用离线启动脚本（推荐）：
+          2. 使用离线启动脚本：
              ```bash
              ./start-offline.sh
              ```
-          
-          ## 手动配置
-          
-          如果手动启动，必须设置以下环境变量：
-          ```bash
-          export npm_config_offline=true
-          export npm_config_prefer_offline=true
-          export ELECTRON_OFFLINE=1
-          
-          npm start
-          ```
           
           ## 故障排除
           
