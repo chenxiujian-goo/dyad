@@ -79,8 +79,8 @@ jobs:
           # ============================================
           # 第三阶段：配置 npm 镜像源
           # ============================================
-          ENV npm_config_registry=https://registry.npmmirror.com
-          ENV ELECTRON_MIRROR=https://npmmirror.com/mirrors/electron/
+          ENV npm_config_registry=https://registry.npmmirror.com 
+          ENV ELECTRON_MIRROR=https://npmmirror.com/mirrors/electron/ 
           ENV ELECTRON_SKIP_BINARY_DOWNLOAD=0
           ENV ELECTRON_DISABLE_SANDBOX=1
 
@@ -242,26 +242,24 @@ SYSDEPS
           # ============================================
           # 第十一阶段：创建部署信息文件
           # ============================================
-          RUN cat > /app/DEPLOYMENT-INFO.txt << EOF
-Dyad 离线部署包信息
-==========================================
-构建时间: $(date)
-操作系统: Ubuntu 20.04
-Node.js: $(node --version)
-NPM: $(npm --version)
-Electron: $(cat node_modules/electron/package.json | grep '"version"' | head -1 | awk -F'"' '{print $4}')
-==========================================
-
-目录大小:
-$(du -sh /app)
-$(du -sh /app/node_modules)
-
-Electron 二进制:
-$(ls -lh /app/node_modules/electron/dist/electron)
-
-关键原生模块:
-$(ls -lh /app/node_modules/better-sqlite3/build/Release/*.node 2>/dev/null || echo "未找到")
-EOF
+          RUN echo "Dyad 离线部署包信息" > /app/DEPLOYMENT-INFO.txt && \
+              echo "==========================================" >> /app/DEPLOYMENT-INFO.txt && \
+              echo "构建时间: $(date)" >> /app/DEPLOYMENT-INFO.txt && \
+              echo "操作系统: Ubuntu 20.04" >> /app/DEPLOYMENT-INFO.txt && \
+              echo "Node.js: $(node --version)" >> /app/DEPLOYMENT-INFO.txt && \
+              echo "NPM: $(npm --version)" >> /app/DEPLOYMENT-INFO.txt && \
+              echo "Electron: $(cat node_modules/electron/package.json 2>/dev/null | grep '\"version\"' | head -1 | awk -F'\"' '{print $4}' || echo 'unknown')" >> /app/DEPLOYMENT-INFO.txt && \
+              echo "==========================================" >> /app/DEPLOYMENT-INFO.txt && \
+              echo "" >> /app/DEPLOYMENT-INFO.txt && \
+              echo "目录大小:" >> /app/DEPLOYMENT-INFO.txt && \
+              du -sh /app >> /app/DEPLOYMENT-INFO.txt && \
+              du -sh /app/node_modules >> /app/DEPLOYMENT-INFO.txt && \
+              echo "" >> /app/DEPLOYMENT-INFO.txt && \
+              echo "Electron 二进制:" >> /app/DEPLOYMENT-INFO.txt && \
+              ls -lh /app/node_modules/electron/dist/electron >> /app/DEPLOYMENT-INFO.txt && \
+              echo "" >> /app/DEPLOYMENT-INFO.txt && \
+              echo "关键原生模块:" >> /app/DEPLOYMENT-INFO.txt && \
+              (ls -lh /app/node_modules/better-sqlite3/build/Release/*.node 2>/dev/null || echo "未找到") >> /app/DEPLOYMENT-INFO.txt
 
           # ============================================
           # 第十二阶段：清理不必要的文件
