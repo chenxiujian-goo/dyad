@@ -26,14 +26,6 @@ jobs:
           ENV DEBIAN_FRONTEND=noninteractive
           ENV TZ=Asia/Shanghai
 
-          # 配置 npm 完全离线，不尝试下载任何 prebuild
-          ENV npm_config_offline=true
-          ENV npm_config_prefer_offline=true
-          ENV npm_config_prebuild_install_binary=false
-          ENV PREBUILD_INSTALL_BINARY=false
-          ENV npm_config_build_from_source=true
-          ENV npm_config_dist_url=https://npmmirror.com/mirrors/electron/
-
           RUN useradd -m -s /bin/bash dyad && \
               mkdir -p /app && \
               chown dyad:dyad /app
@@ -58,7 +50,7 @@ jobs:
 
           RUN node --version && npm --version
 
-          # 配置 npm 镜像
+          # 配置 npm 镜像（仅镜像，不设置离线）
           ENV npm_config_registry=https://registry.npmmirror.com  
           ENV ELECTRON_MIRROR=https://npmmirror.com/mirrors/electron/  
           ENV ELECTRON_BUILDER_BINARIES_MIRROR=https://npmmirror.com/mirrors/electron-builder-binaries/
@@ -69,24 +61,28 @@ jobs:
 
           USER dyad
 
-          # 安装依赖
+          # 安装依赖（正常联网安装）
           RUN npm cache clean --force && \
               npm install --include=dev --no-audit --no-fund
 
           # 创建必要目录
           RUN mkdir -p userData .vite/build
 
-          # 关键：完全禁用 prebuild，强制从源码构建 better-sqlite3
+          # 关键：构建 better-sqlite3 时强制从源码构建，禁用 prebuild 下载
           RUN cd node_modules/better-sqlite3 && \
               rm -rf prebuilds && \
+              npm_config_build_from_source=true \
+              npm_config_dist_url=https://npmmirror.com/mirrors/electron/ \
               npm run build-release --verbose
 
           # 验证构建产物
           RUN ls -la node_modules/better-sqlite3/build/Release/better_sqlite3.node && \
               file node_modules/better-sqlite3/build/Release/better_sqlite3.node
 
-          # 运行 electron-rebuild 确保所有 native 模块一致
-          RUN npx electron-rebuild --arch=x64 --version=40.0.0 --verbose --build-from-source || \
+          # 运行 electron-rebuild 确保所有 native 模块一致（强制从源码构建）
+          RUN npm_config_build_from_source=true \
+              npm_config_dist_url=https://npmmirror.com/mirrors/electron/ \
+              npx electron-rebuild --arch=x64 --version=40.0.0 --verbose || \
               echo "electron-rebuild completed"
 
           # 构建项目
@@ -179,8 +175,6 @@ jobs:
           cat > ./offline-deps/.npmrc << 'EOF'
           offline=true
           prefer-offline=true
-          prebuild-install-binary=false
-          build-from-source=true
           fetch-retries=0
           fetch-retry-mintimeout=1
           fetch-retry-maxtimeout=1
@@ -196,17 +190,10 @@ jobs:
           # 强制离线配置
           export npm_config_offline=true
           export npm_config_prefer_offline=true
-          export npm_config_prebuild_install_binary=false
-          export PREBUILD_INSTALL_BINARY=false
-          export npm_config_build_from_source=true
-          export ELECTRON_OFFLINE=1
-          
-          # 防止任何网络请求
           export npm_config_fetch_retries=0
           export npm_config_fetch_retry_mintimeout=1
           export npm_config_fetch_retry_maxtimeout=1
-          export ELECTRON_SKIP_BINARY_DOWNLOAD=1
-          export ELECTRON_OVERRIDE_DIST_PATH=""
+          export ELECTRON_OFFLINE=1
           
           echo "Starting Dyad in offline mode..."
           npm start
@@ -239,35 +226,23 @@ jobs:
           ```bash
           export npm_config_offline=true
           export npm_config_prefer_offline=true
-          export npm_config_prebuild_install_binary=false
-          export PREBUILD_INSTALL_BINARY=false
-          export npm_config_build_from_source=true
           export ELECTRON_OFFLINE=1
-          export ELECTRON_SKIP_BINARY_DOWNLOAD=1
           
           npm start
           ```
           
           ## 故障排除
           
-          ### 如果仍然尝试下载
-          1. 检查 .npmrc 文件是否被正确复制到项目根目录
-          2. 检查 better-sqlite3 构建文件是否存在：
+          ### 如果仍然尝试下载 prebuild
+          1. 检查 better-sqlite3 构建文件是否存在：
              ```bash
              ls -la node_modules/better-sqlite3/build/Release/better_sqlite3.node
              ```
-          3. 如果存在但还是下载，删除 prebuilds 目录：
+          2. 如果存在但还是下载，删除 prebuilds 目录：
              ```bash
              rm -rf node_modules/better-sqlite3/prebuilds
              rm -rf node_modules/**/prebuilds
              ```
-          
-          ### Electron 版本不匹配
-          本地 Electron 版本必须与构建时一致：
-          ```bash
-          cat node_modules/electron/package.json | grep version
-          cat electron-version.txt  # 应该一致
-          ```
           EOF
           
           # 打包
