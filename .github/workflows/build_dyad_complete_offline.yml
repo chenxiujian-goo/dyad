@@ -26,13 +26,21 @@ jobs:
           ENV DEBIAN_FRONTEND=noninteractive
           ENV TZ=Asia/Shanghai
 
+          # 配置 npm 完全离线，不尝试下载任何 prebuild
+          ENV npm_config_offline=true
+          ENV npm_config_prefer_offline=true
+          ENV npm_config_prebuild_install_binary=false
+          ENV PREBUILD_INSTALL_BINARY=false
+          ENV npm_config_build_from_source=true
+          ENV npm_config_dist_url=https://npmmirror.com/mirrors/electron/
+
           RUN useradd -m -s /bin/bash dyad && \
               mkdir -p /app && \
               chown dyad:dyad /app
 
           WORKDIR /app
 
-          # 安装所有依赖（包含 Python 和编译工具，用于从源码构建）
+          # 安装所有依赖（包含 Python 和编译工具）
           RUN apt-get update && apt-get install -y \
             curl wget git python3 python3-distutils python3-dev \
             make g++ gcc build-essential \
@@ -48,7 +56,6 @@ jobs:
             && apt-get install -y nodejs \
             && rm -rf /var/lib/apt/lists/*
 
-          # 验证 Node 版本
           RUN node --version && npm --version
 
           # 配置 npm 镜像
@@ -62,28 +69,27 @@ jobs:
 
           USER dyad
 
-          # 安装依赖（包括 devDependencies，因为需要 electron-rebuild）
+          # 安装依赖
           RUN npm cache clean --force && \
               npm install --include=dev --no-audit --no-fund
 
           # 创建必要目录
           RUN mkdir -p userData .vite/build
 
-          # 关键步骤：预先下载 Electron headers 并强制从源码编译所有 native 模块
-          # 这样在无网环境下就不需要再下载任何东西
+          # 关键：完全禁用 prebuild，强制从源码构建 better-sqlite3
           RUN cd node_modules/better-sqlite3 && \
-              npx prebuild-install --runtime=electron --target=40.0.0 --arch=x64 --platform=linux --tag-prefix=v --verbose || \
-              (npm run build-release --verbose && echo "Built better-sqlite3 from source")
+              rm -rf prebuilds && \
+              npm run build-release --verbose
 
-          # 运行 electron-rebuild 确保所有 native 模块都针对当前 Electron 版本编译
-          RUN npx electron-rebuild --arch=x64 --version=40.0.0 --verbose || \
-              echo "electron-rebuild completed with warnings"
+          # 验证构建产物
+          RUN ls -la node_modules/better-sqlite3/build/Release/better_sqlite3.node && \
+              file node_modules/better-sqlite3/build/Release/better_sqlite3.node
 
-          # 验证 native 模块是否正确构建
-          RUN ls -la node_modules/better-sqlite3/build/Release/ 2>/dev/null || \
-              find node_modules/better-sqlite3 -name "*.node" -type f
+          # 运行 electron-rebuild 确保所有 native 模块一致
+          RUN npx electron-rebuild --arch=x64 --version=40.0.0 --verbose --build-from-source || \
+              echo "electron-rebuild completed"
 
-          # 尝试构建项目
+          # 构建项目
           RUN npm run build 2>/dev/null || npm run vite:build 2>/dev/null || echo "Build step completed"
 
           USER root
@@ -105,11 +111,9 @@ jobs:
         run: |
           docker build -f Dockerfile.fullbuild -t dyad-fullbuild:latest .
 
-      # 阶段2：启动容器运行一次，确保所有运行时文件生成
+      # 阶段2：启动容器运行一次
       - name: Run Container to Generate Runtime Files
         run: |
-          echo "Starting container to generate all runtime files..."
-          
           docker run -d \
             --name dyad-runtime \
             -e DISPLAY=:99 \
@@ -121,23 +125,17 @@ jobs:
               sleep 2
               cd /app
               
-              echo '=== 检查 better-sqlite3 构建状态 ==='
-              ls -la node_modules/better-sqlite3/build/Release/ 2>/dev/null || echo 'Checking alternative locations...'
-              find node_modules/better-sqlite3 -name '*.node' -type f
+              echo '=== 验证 better-sqlite3 构建 ==='
+              ls -la node_modules/better-sqlite3/build/Release/
+              file node_modules/better-sqlite3/build/Release/better_sqlite3.node
               
-              echo '=== 启动应用触发任何剩余的初始化 ==='
+              echo '=== 启动应用 ==='
               timeout 30s npx electron . --no-sandbox --disable-gpu 2>&1 || echo 'Runtime initialization completed'
-              
-              echo '=== 检查生成的运行时文件 ==='
-              ls -la ~/.config/ 2>/dev/null || true
-              ls -la ~/.cache/ 2>/dev/null || true
               
               sleep 5
             "
           
-          echo "Waiting for runtime initialization (60s)..."
           sleep 60
-          
           docker logs dyad-runtime
           docker stop dyad-runtime
 
@@ -147,12 +145,11 @@ jobs:
           docker commit dyad-runtime dyad-final:latest
           docker rm dyad-runtime
 
-      # 阶段4：从镜像中提取所有必要文件（修复版）
+      # 阶段4：提取所有必要文件
       - name: Extract All Dependencies
         run: |
           echo "Extracting all dependencies for offline use..."
           
-          # 创建临时容器（不启动）
           docker create --name dyad-extract dyad-final:latest
           
           mkdir -p ./offline-deps
@@ -166,43 +163,64 @@ jobs:
           docker cp dyad-extract:/app/.vite ./offline-deps/ 2>/dev/null || true
           docker cp dyad-extract:/app/dist ./offline-deps/ 2>/dev/null || true
           
-          # 关键：提取 Electron 和 better-sqlite3 的预构建文件
-          mkdir -p ./offline-deps/electron-prebuilt
-          docker cp dyad-extract:/app/node_modules/electron ./offline-deps/electron-prebuilt/ 2>/dev/null || true
+          # 检查 better-sqlite3
+          echo "=== 检查 better-sqlite3 ==="
+          docker cp dyad-extract:/app/node_modules/better-sqlite3 ./offline-deps/check_better-sqlite3
+          ls -la ./offline-deps/check_better-sqlite3/build/Release/ 2>/dev/null || echo "No build directory"
+          find ./offline-deps/check_better-sqlite3 -name "*.node" -type f
           
-          # 检查 better-sqlite3 的具体构建产物（使用 docker cp 而不是 exec）
-          echo "=== 检查 better-sqlite3 构建产物 ==="
-          mkdir -p ./offline-deps/check
-          docker cp dyad-extract:/app/node_modules/better-sqlite3 ./offline-deps/check/ 2>/dev/null || true
-          
-          if [ -f "./offline-deps/check/better-sqlite3/build/Release/better_sqlite3.node" ]; then
-            echo "✅ better-sqlite3 构建成功"
-            ls -la ./offline-deps/check/better-sqlite3/build/Release/
-          else
-            echo "⚠️  查找所有 .node 文件："
-            find ./offline-deps/check/better-sqlite3 -name "*.node" -type f 2>/dev/null || echo "未找到 .node 文件"
-          fi
-          
-          # 创建 Electron 版本信息文件
+          # 创建版本信息
           docker cp dyad-extract:/app/node_modules/electron/package.json ./offline-deps/electron-package.json
           cat ./offline-deps/electron-package.json | grep version > ./offline-deps/electron-version.txt
           
-          # 清理临时容器
           docker rm dyad-extract
           
-          # 创建详细使用说明
+          # 创建 .npmrc 配置文件（关键！强制离线）
+          cat > ./offline-deps/.npmrc << 'EOF'
+          offline=true
+          prefer-offline=true
+          prebuild-install-binary=false
+          build-from-source=true
+          fetch-retries=0
+          fetch-retry-mintimeout=1
+          fetch-retry-maxtimeout=1
+          EOF
+          
+          # 创建启动脚本
+          cat > ./offline-deps/start-offline.sh << 'EOF'
+          #!/bin/bash
+          # Dyad 离线启动脚本
+          
+          echo "Setting up offline environment..."
+          
+          # 强制离线配置
+          export npm_config_offline=true
+          export npm_config_prefer_offline=true
+          export npm_config_prebuild_install_binary=false
+          export PREBUILD_INSTALL_BINARY=false
+          export npm_config_build_from_source=true
+          export ELECTRON_OFFLINE=1
+          
+          # 防止任何网络请求
+          export npm_config_fetch_retries=0
+          export npm_config_fetch_retry_mintimeout=1
+          export npm_config_fetch_retry_maxtimeout=1
+          export ELECTRON_SKIP_BINARY_DOWNLOAD=1
+          export ELECTRON_OVERRIDE_DIST_PATH=""
+          
+          echo "Starting Dyad in offline mode..."
+          npm start
+          EOF
+          chmod +x ./offline-deps/start-offline.sh
+          
+          # 创建使用说明
           cat > ./offline-deps/README.md << 'EOF'
-          # Dyad 离线依赖包（完全预构建版）
+          # Dyad 完全离线依赖包
           
           ## 重要提示
-          此包包含完全从源码编译的 native 模块（包括 better-sqlite3），无需网络即可运行。
+          此包包含从源码编译的 better-sqlite3，已完全禁用 prebuild 下载。
           
-          ## 环境要求
-          - Ubuntu 20.04
-          - Node.js 24.x（必须严格一致）
-          - Electron 40.0.0（已包含在包内）
-          
-          ## 安装步骤
+          ## 快速开始
           
           1. 解压到项目根目录：
              ```bash
@@ -210,72 +228,52 @@ jobs:
              tar -xzf offline-dependencies.tar.gz
              ```
           
-          2. 替换现有依赖：
+          2. 使用离线启动脚本（推荐）：
              ```bash
-             rm -rf node_modules
-             cp -r offline-deps/node_modules ./
-             cp -r offline-deps/.vite ./ 2>/dev/null || true
+             ./start-offline.sh
              ```
           
-          3. 设置 Electron 缓存（关键！）：
-             ```bash
-             mkdir -p ~/.cache
-             cp -r offline-deps/cache/* ~/.cache/
-             
-             # 确保 better-sqlite3 的预构建文件在正确位置
-             mkdir -p ~/.cache/electron
-             ```
+          ## 手动配置
           
-          4. 修复权限：
-             ```bash
-             chmod -R 755 node_modules
-             ```
+          如果手动启动，必须设置以下环境变量：
+          ```bash
+          export npm_config_offline=true
+          export npm_config_prefer_offline=true
+          export npm_config_prebuild_install_binary=false
+          export PREBUILD_INSTALL_BINARY=false
+          export npm_config_build_from_source=true
+          export ELECTRON_OFFLINE=1
+          export ELECTRON_SKIP_BINARY_DOWNLOAD=1
           
-          5. 安装系统依赖（如果还没装）：
-             ```bash
-             sudo apt-get update
-             sudo apt-get install -y libnss3 libatk-bridge2.0-0 libdrm2 \
-               libxkbcommon0 libxcomposite1 libxdamage1 libxrandr2 libgbm1 \
-               libxss1 libasound2 libgtk-3-0 libxtst6 libatspi2.0-0
-             ```
-          
-          6. 启动（使用离线模式）：
-             ```bash
-             # 设置离线环境变量，防止任何网络请求
-             export ELECTRON_OFFLINE=1
-             export npm_config_offline=true
-             export npm_config_prefer_offline=true
-             
-             npm start
-             ```
+          npm start
+          ```
           
           ## 故障排除
           
-          ### 如果仍然尝试下载 prebuild
-          1. 检查 better-sqlite3 的预构建文件是否存在：
+          ### 如果仍然尝试下载
+          1. 检查 .npmrc 文件是否被正确复制到项目根目录
+          2. 检查 better-sqlite3 构建文件是否存在：
              ```bash
              ls -la node_modules/better-sqlite3/build/Release/better_sqlite3.node
              ```
-          
-          2. 如果文件存在但还是下载，强制使用本地构建：
+          3. 如果存在但还是下载，删除 prebuilds 目录：
              ```bash
-             npx electron-rebuild --prebuild-tag-prefix=v --build-from-source
+             rm -rf node_modules/better-sqlite3/prebuilds
+             rm -rf node_modules/**/prebuilds
              ```
           
-          3. 检查 Electron 版本是否匹配：
-             ```bash
-             cat node_modules/electron/package.json | grep version
-             cat offline-deps/electron-version.txt
-             ```
-          
-          ### 如果提示缺少 headers
-          需要确保本地 Electron 版本与构建时一致（40.0.0），否则需要重新编译。
+          ### Electron 版本不匹配
+          本地 Electron 版本必须与构建时一致：
+          ```bash
+          cat node_modules/electron/package.json | grep version
+          cat electron-version.txt  # 应该一致
+          ```
           EOF
           
           # 打包
           tar -czf offline-dependencies.tar.gz -C ./offline-deps .
           
-          echo "=== 包内容 ==="
+          echo "=== 包大小 ==="
           ls -lh offline-dependencies.tar.gz
           du -sh ./offline-deps/node_modules
 
@@ -290,11 +288,8 @@ jobs:
         run: |
           echo "## ✅ 完全离线依赖包构建完成" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
-          echo "此包包含从源码编译的 better-sqlite3，无需网络即可运行" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "本地使用时务必设置环境变量：" >> $GITHUB_STEP_SUMMARY
+          echo "使用方式：" >> $GITHUB_STEP_SUMMARY
           echo '```bash' >> $GITHUB_STEP_SUMMARY
-          echo 'export ELECTRON_OFFLINE=1' >> $GITHUB_STEP_SUMMARY
-          echo 'export npm_config_offline=true' >> $GITHUB_STEP_SUMMARY
-          echo 'npm start' >> $GITHUB_STEP_SUMMARY
+          echo 'tar -xzf offline-dependencies.tar.gz' >> $GITHUB_STEP_SUMMARY
+          echo './start-offline.sh' >> $GITHUB_STEP_SUMMARY
           echo '```' >> $GITHUB_STEP_SUMMARY
